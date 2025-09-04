@@ -59,9 +59,9 @@ async def check_user_subscription(user_id: int, username: str):
         return True, "49", CHANNEL_49_299  # Default for testing
     
     try:
-        # Query your subscription table
+        # Query your subscription table - using amount_paid column
         response = supabase_client.table("subscriptions") \
-            .select("amount, payment_status, is_active, telegram_username") \
+            .select("amount_paid, payment_status, is_active, telegram_username") \
             .or_(f"telegram_username.ilike.%{username}%,telegram_user_id.eq.{user_id}") \
             .eq("payment_status", "completed") \
             .eq("is_active", True) \
@@ -70,8 +70,8 @@ async def check_user_subscription(user_id: int, username: str):
         # If we found a valid subscription
         if response.data and len(response.data) > 0:
             subscription = response.data[0]
-            amount = str(subscription['amount'])
-            logger.info(f"User {user_id} (@{username}) found in Supabase with amount: {amount}")
+            amount = str(subscription['amount_paid'])  # Using amount_paid column
+            logger.info(f"User {user_id} (@{username}) found in Supabase with amount_paid: {amount}")
             
             # Check if amount matches our expected values
             if amount in PAYMENT_CHANNELS:
@@ -214,6 +214,51 @@ async def manual_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in manual_approve: {e}")
 
+async def generate_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Generate an invite link for a user based on their subscription
+    """
+    try:
+        # Check if user is admin
+        if not await is_admin(update, context):
+            await update.message.reply_text("Only admins can use this command.")
+            return
+        
+        # Get the username from command arguments
+        if not context.args:
+            await update.message.reply_text("Please specify a username: /invite @username")
+            return
+            
+        username = context.args[0].replace('@', '')  # Remove @ if present
+        
+        # Check if user has a valid subscription
+        has_subscription, amount, channel_id = await check_user_subscription(0, username)  # 0 as user_id since we're checking by username
+        
+        if has_subscription:
+            # Generate an invite link for the correct channel
+            try:
+                invite_link = await context.bot.create_chat_invite_link(
+                    chat_id=channel_id,
+                    name=f"Invite for {username}",
+                    creates_join_request=True  # This makes the link require admin approval
+                )
+                
+                await update.message.reply_text(
+                    f"✅ Invite link for @{username} (₹{amount}):\n{invite_link.invite_link}\n\n"
+                    f"This link will require admin approval when used."
+                )
+                logger.info(f"Generated invite link for @{username} to channel {channel_id}")
+                
+            except Exception as e:
+                logger.error(f"Error generating invite link: {e}")
+                await update.message.reply_text("Error generating invite link. Make sure the bot has permission to create invite links.")
+        else:
+            await update.message.reply_text(f"❌ No valid subscription found for @{username}.")
+            
+    except Exception as e:
+        logger.error(f"Error in generate_invite: {e}")
+        await update.message.reply_text("Error generating invite link.")
+
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Command for users to check their subscription status
@@ -279,6 +324,7 @@ def main():
     # Add handlers
     application.add_handler(ChatMemberHandler(handle_chat_member, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(CommandHandler("approve", manual_approve))
+    application.add_handler(CommandHandler("invite", generate_invite))
     application.add_handler(CommandHandler("check", check_subscription))
     application.add_error_handler(error_handler)
     
