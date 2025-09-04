@@ -2,7 +2,7 @@ import os
 import logging
 from datetime import datetime
 from telegram import Update, ChatMember
-from telegram.ext import Application, CommandHandler, ContextTypes, ChatMemberHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, ChatMemberHandler, MessageHandler, filters
 
 # Try to import supabase, but handle if it fails
 try:
@@ -47,6 +47,15 @@ PAYMENT_CHANNELS = {
     '79': CHANNEL_79_399,
     '399': CHANNEL_79_399
 }
+
+async def post_init(application: Application):
+    """Post initialization function to set up bot commands"""
+    await application.bot.set_my_commands([
+        ("check", "Check your subscription status"),
+        ("approve", "Approve a user (admin only)"),
+        ("invite", "Generate invite link for a user (admin only)"),
+    ])
+    logger.info("Bot commands registered successfully")
 
 async def check_user_subscription(user_id: int, username: str):
     """
@@ -281,6 +290,28 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Error in check_subscription: {e}")
         await update.message.reply_text("Sorry, there was an error checking your subscription status.")
 
+async def handle_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle messages in channels"""
+    try:
+        # Check if message is from one of our channels
+        chat_id = str(update.message.chat.id)
+        if chat_id not in [CHANNEL_49_299, CHANNEL_79_399]:
+            return
+        
+        # Check if message is a command
+        if update.message.text and update.message.text.startswith('/'):
+            command = update.message.text.split()[0].lower()
+            
+            if command == '/check':
+                await check_subscription(update, context)
+            elif command == '/approve':
+                await manual_approve(update, context)
+            elif command == '/invite':
+                await generate_invite(update, context)
+                
+    except Exception as e:
+        logger.error(f"Error in handle_channel_message: {e}")
+
 async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """
     Check if the user is an admin in any of our channels
@@ -318,14 +349,18 @@ def main():
     if not SUPABASE_URL or not SUPABASE_KEY:
         logger.warning("Supabase environment variables not set - running in test mode")
     
-    # Create the Application
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Create the Application with post_init
+    application = Application.builder() \
+        .token(BOT_TOKEN) \
+        .post_init(post_init) \
+        .build()
     
     # Add handlers
     application.add_handler(ChatMemberHandler(handle_chat_member, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(CommandHandler("approve", manual_approve))
     application.add_handler(CommandHandler("invite", generate_invite))
     application.add_handler(CommandHandler("check", check_subscription))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_channel_message))
     application.add_error_handler(error_handler)
     
     # Start the Bot
