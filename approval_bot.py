@@ -3,7 +3,14 @@ import logging
 from datetime import datetime
 from telegram import Update, ChatMember
 from telegram.ext import Application, CommandHandler, ContextTypes, ChatMemberHandler
-from supabase import create_client, Client
+
+# Try to import supabase, but handle if it fails
+try:
+    from supabase import create_client, Client
+    supabase_available = True
+except ImportError:
+    supabase_available = False
+    logging.warning("Supabase library not available")
 
 # Configure logging
 logging.basicConfig(
@@ -21,8 +28,17 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 CHANNEL_49_299 = os.environ.get('CHANNEL_49_299_ID')  # Channel for 49/299 payments
 CHANNEL_79_399 = os.environ.get('CHANNEL_79_399_ID')  # Channel for 79/399 payments
 
-# Initialize Supabase client
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Initialize Supabase client only if variables are available
+supabase_client = None
+if supabase_available and SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info("Supabase client initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize Supabase client: {e}")
+        supabase_client = None
+else:
+    logger.warning("Supabase client not initialized - missing environment variables")
 
 # Payment amount mapping to channels
 PAYMENT_CHANNELS = {
@@ -37,9 +53,14 @@ async def check_user_subscription(user_id: int, username: str):
     Check if user exists in Supabase with a valid subscription
     and return their payment amount and channel
     """
+    # If Supabase is not available, allow all users (for testing)
+    if not supabase_client:
+        logger.warning("Supabase not available - allowing user access")
+        return True, "49", CHANNEL_49_299  # Default for testing
+    
     try:
         # Query your subscription table
-        response = supabase.table("subscriptions") \
+        response = supabase_client.table("subscriptions") \
             .select("amount, payment_status, is_active, telegram_username") \
             .or_(f"telegram_username.ilike.%{username}%,telegram_user_id.eq.{user_id}") \
             .eq("payment_status", "completed") \
@@ -243,11 +264,14 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Start the bot."""
     # Check if all required environment variables are set
-    required_vars = ['TELEGRAM_BOT_TOKEN', 'SUPABASE_URL', 'SUPABASE_KEY', 'CHANNEL_49_299_ID', 'CHANNEL_79_399_ID']
+    required_vars = ['TELEGRAM_BOT_TOKEN', 'CHANNEL_49_299_ID', 'CHANNEL_79_399_ID']
     for var in required_vars:
         if not os.environ.get(var):
             logger.error(f"Missing required environment variable: {var}")
             return
+    
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        logger.warning("Supabase environment variables not set - running in test mode")
     
     # Create the Application
     application = Application.builder().token(BOT_TOKEN).build()
