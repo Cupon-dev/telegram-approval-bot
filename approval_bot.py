@@ -1,10 +1,7 @@
 import os
 import logging
-import http.server
-import socketserver
-import threading
 from telegram import Update, ChatMember
-from telegram.ext import Application, CommandHandler, ContextTypes, ChatMemberHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, ChatMemberHandler
 
 # Try to import supabase
 try:
@@ -47,40 +44,6 @@ PAYMENT_CHANNELS = {
     '79': CHANNEL_79_399,
     '399': CHANNEL_79_399
 }
-
-# Simple HTTP server for health checks
-class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'OK')
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-def start_health_check_server():
-    """Start a simple HTTP server for health checks"""
-    port = int(os.environ.get('PORT', 8080))
-    
-    def run_server():
-        with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
-            logger.info(f"Health check server started on port {port}")
-            httpd.serve_forever()
-    
-    server_thread = threading.Thread(target=run_server, daemon=True)
-    server_thread.start()
-
-async def post_init(application: Application):
-    """Set up bot commands"""
-    await application.bot.set_my_commands([
-        ("check", "Check your subscription status"),
-        ("approve", "Approve a user (admin only)"),
-        ("invite", "Generate invite link for a user (admin only)"),
-        ("test", "Test if bot is working"),
-    ])
-    logger.info("Bot commands registered")
 
 async def check_user_subscription(user_id: int, username: str):
     """Check if user has a valid subscription"""
@@ -153,12 +116,30 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     try:
                         await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
                         logger.info(f"Kicked {username} from wrong channel")
+                        
+                        # Notify user
+                        channel_name = "49/299" if correct_channel_id == CHANNEL_49_299 else "79/399"
+                        try:
+                            await context.bot.send_message(
+                                chat_id=user_id,
+                                text=f"❌ You joined the wrong channel. Your subscription is for {channel_name} channel."
+                            )
+                        except:
+                            logger.warning("Could not message user")
                     except Exception as e:
                         logger.error(f"Error kicking user: {e}")
             else:
                 try:
                     await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
                     logger.info(f"Kicked {username} - no subscription")
+                    
+                    try:
+                        await context.bot.send_message(
+                            chat_id=user_id,
+                            text="❌ Access denied. You need a valid subscription to join this channel."
+                        )
+                    except:
+                        logger.warning("Could not message user")
                 except Exception as e:
                     logger.error(f"Error kicking user: {e}")
                     
@@ -166,17 +147,20 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Error in handle_chat_member: {e}")
 
 async def manual_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual approval command"""
+    """Manual approval command for admins"""
     try:
         if not update.message.reply_to_message:
-            await update.message.reply_text("Reply to a user's message with /approve")
+            await update.message.reply_text("Please reply to a user's message with /approve")
             return
             
-        user = update.message.reply_to_message.from_user
-        user_id = user.id
-        username = user.username or f"user_{user_id}"
+        user_to_approve = update.message.reply_to_message.from_user
+        user_id = user_to_approve.id
+        username = user_to_approve.username or f"user_{user_id}"
+        
+        # Get the channel ID from the message
         channel_id = str(update.message.chat_id)
         
+        # Unban the user in this channel
         try:
             await context.bot.unban_chat_member(
                 chat_id=channel_id,
@@ -184,47 +168,50 @@ async def manual_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 only_if_banned=True
             )
             
-            logger.info(f"Manually approved {username}")
-            await update.message.reply_text(f"✅ User @{username} approved.")
+            logger.info(f"Manually approved user {user_id} (@{username})")
+            await update.message.reply_text(f"✅ User @{username} has been manually approved.")
             
         except Exception as e:
-            await update.message.reply_text(f"Error: {e}")
+            await update.message.reply_text(f"Error approving user: {e}")
             
     except Exception as e:
         logger.error(f"Error in manual_approve: {e}")
 
 async def generate_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate invite link"""
+    """Generate invite link for a user"""
     try:
         if not context.args:
-            await update.message.reply_text("Usage: /invite @username")
+            await update.message.reply_text("Please specify a username: /invite @username")
             return
             
         username = context.args[0].replace('@', '')
         
+        # Check if user has a valid subscription
         has_subscription, amount, channel_id = await check_user_subscription(0, username)
         
         if has_subscription:
+            # Generate an invite link for the correct channel
             try:
                 invite_link = await context.bot.create_chat_invite_link(
                     chat_id=channel_id,
                     name=f"Invite for {username}",
-                    creates_join_request=False
+                    creates_join_request=True
                 )
                 
                 await update.message.reply_text(
-                    f"✅ Invite for @{username} (₹{amount}):\n{invite_link.invite_link}"
+                    f"✅ Invite link for @{username} (₹{amount}):\n{invite_link.invite_link}"
                 )
                 logger.info(f"Generated invite for @{username}")
                 
             except Exception as e:
-                logger.error(f"Error generating invite: {e}")
-                await update.message.reply_text("Error generating invite link.")
+                logger.error(f"Error generating invite link: {e}")
+                await update.message.reply_text("Error generating invite link. Make sure the bot has permission to create invite links.")
         else:
-            await update.message.reply_text(f"❌ No subscription found for @{username}.")
+            await update.message.reply_text(f"❌ No valid subscription found for @{username}.")
             
     except Exception as e:
         logger.error(f"Error in generate_invite: {e}")
+        await update.message.reply_text("Error generating invite link.")
 
 async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check subscription status"""
@@ -233,17 +220,18 @@ async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE)
         user_id = user.id
         username = user.username or f"user_{user_id}"
         
+        # Check subscription status
         has_subscription, amount, channel_id = await check_user_subscription(user_id, username)
         
         if has_subscription:
             channel_name = "49/299" if channel_id == CHANNEL_49_299 else "79/399"
-            await update.message.reply_text(f"✅ Active subscription! (₹{amount}) for {channel_name} channel.")
+            await update.message.reply_text(f"✅ Your subscription (₹{amount}) is active! You have access to the {channel_name} channel.")
         else:
-            await update.message.reply_text("❌ No active subscription found.")
+            await update.message.reply_text("❌ No active subscription found. Please visit our website to purchase a subscription.")
             
     except Exception as e:
         logger.error(f"Error in check_subscription: {e}")
-        await update.message.reply_text("Error checking subscription.")
+        await update.message.reply_text("Sorry, there was an error checking your subscription status.")
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Test if bot is working"""
@@ -259,9 +247,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Start the bot"""
-    # Start health check server
-    start_health_check_server()
-    
     # Check required variables
     required_vars = ['TELEGRAM_BOT_TOKEN', 'CHANNEL_49_299_ID', 'CHANNEL_79_399_ID']
     for var in required_vars:
@@ -272,7 +257,6 @@ def main():
     # Create application
     application = Application.builder() \
         .token(BOT_TOKEN) \
-        .post_init(post_init) \
         .build()
     
     # Add handlers
@@ -283,32 +267,15 @@ def main():
     application.add_handler(CommandHandler("test", test_command))
     application.add_error_handler(error_handler)
     
-    # Start bot
-    logger.info("Bot starting...")
-    logger.info(f"Channels: {CHANNEL_49_299} and {CHANNEL_79_399}")
+    # Start bot with polling (simpler for now)
+    logger.info("Bot starting with polling...")
+    logger.info(f"Monitoring channels: {CHANNEL_49_299} (49/299) and {CHANNEL_79_399} (79/399)")
     
-    # Use webhook mode for Railway
-    port = int(os.environ.get('PORT', 8443))
-    railway_url = os.environ.get('RAILWAY_STATIC_URL', 'https://your-project.railway.app')
-    
-    logger.info(f"Using webhook mode with URL: {railway_url}")
-    
-    try:
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=BOT_TOKEN,
-            webhook_url=f"{railway_url}/{BOT_TOKEN}",
-            drop_pending_updates=True
-        )
-    except Exception as e:
-        logger.error(f"Webhook failed: {e}")
-        logger.info("Falling back to polling...")
-        application.run_polling(
-            allowed_updates=[Update.CHAT_MEMBER, Update.MESSAGE],
-            drop_pending_updates=True,
-            poll_interval=2.0
-        )
+    application.run_polling(
+        allowed_updates=[Update.CHAT_MEMBER, Update.MESSAGE],
+        drop_pending_updates=True,
+        poll_interval=1.0
+    )
     
     logger.info("Bot stopped")
 
