@@ -1,5 +1,7 @@
 import os
 import logging
+import threading
+from aiohttp import web
 from telegram import Update, ChatMember
 from telegram.ext import Application, CommandHandler, ContextTypes, ChatMemberHandler, MessageHandler, filters
 
@@ -24,7 +26,6 @@ SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 CHANNEL_49_299 = os.environ.get('CHANNEL_49_299_ID')
 CHANNEL_79_399 = os.environ.get('CHANNEL_79_399_ID')
-RAILWAY_STATIC_URL = os.environ.get('RAILWAY_STATIC_URL')
 
 # Initialize Supabase client
 supabase_client = None
@@ -46,6 +47,24 @@ PAYMENT_CHANNELS = {
     '399': CHANNEL_79_399
 }
 
+# Health check server
+def start_health_check_server():
+    """Start a simple HTTP server for health checks"""
+    async def health_check(request):
+        return web.Response(text="OK")
+    
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    
+    port = int(os.environ.get('PORT', 8080))
+    
+    def run_server():
+        web.run_app(app, port=port, host='0.0.0.0')
+    
+    server_thread = threading.Thread(target=run_server, daemon=True)
+    server_thread.start()
+    logger.info(f"Health check server started on port {port}")
+
 async def post_init(application: Application):
     """Set up bot commands"""
     await application.bot.set_my_commands([
@@ -63,7 +82,6 @@ async def check_user_subscription(user_id: int, username: str):
         return True, "49", CHANNEL_49_299
     
     try:
-        # Query using amount_paid column
         response = supabase_client.table("subscriptions") \
             .select("amount_paid, payment_status, is_active, telegram_username") \
             .ilike("telegram_username", f"%{username}%") \
@@ -101,11 +119,9 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         logger.info(f"Chat member update: {user_id} in {chat_id}")
         
-        # Check if this is our target channel
         if chat_id not in [CHANNEL_49_299, CHANNEL_79_399]:
             return
         
-        # Check if this is a new member joining
         old_status = chat_member.old_chat_member.status
         new_status = chat_member.new_chat_member.status
         
@@ -114,12 +130,10 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
             logger.info(f"New user joining: {username} in {chat_id}")
             
-            # Check subscription
             has_subscription, amount, correct_channel_id = await check_user_subscription(user_id, username)
             
             if has_subscription:
                 if chat_id == correct_channel_id:
-                    # Welcome user
                     try:
                         await context.bot.send_message(
                             chat_id=chat_id,
@@ -129,35 +143,15 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     except Exception as e:
                         logger.error(f"Error sending welcome: {e}")
                 else:
-                    # Wrong channel - kick user
                     try:
                         await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
                         logger.info(f"Kicked {username} from wrong channel")
-                        
-                        # Notify user
-                        channel_name = "49/299" if correct_channel_id == CHANNEL_49_299 else "79/399"
-                        try:
-                            await context.bot.send_message(
-                                chat_id=user_id,
-                                text=f"❌ Wrong channel. Your subscription is for {channel_name} channel."
-                            )
-                        except:
-                            logger.warning("Could not message user")
                     except Exception as e:
                         logger.error(f"Error kicking user: {e}")
             else:
-                # No subscription - kick user
                 try:
                     await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
                     logger.info(f"Kicked {username} - no subscription")
-                    
-                    try:
-                        await context.bot.send_message(
-                            chat_id=user_id,
-                            text="❌ Access denied. You need a valid subscription."
-                        )
-                    except:
-                        logger.warning("Could not message user")
                 except Exception as e:
                     logger.error(f"Error kicking user: {e}")
                     
@@ -167,10 +161,6 @@ async def handle_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def manual_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manual approval command"""
     try:
-        if not await is_admin(update, context):
-            await update.message.reply_text("Only admins can use this command.")
-            return
-        
         if not update.message.reply_to_message:
             await update.message.reply_text("Reply to a user's message with /approve")
             return
@@ -180,7 +170,6 @@ async def manual_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
         username = user.username or f"user_{user_id}"
         channel_id = str(update.message.chat_id)
         
-        # Unban the user
         try:
             await context.bot.unban_chat_member(
                 chat_id=channel_id,
@@ -188,7 +177,7 @@ async def manual_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 only_if_banned=True
             )
             
-            logger.info(f"Manually approved {username} by admin")
+            logger.info(f"Manually approved {username}")
             await update.message.reply_text(f"✅ User @{username} approved.")
             
         except Exception as e:
@@ -200,21 +189,15 @@ async def manual_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def generate_invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Generate invite link"""
     try:
-        if not await is_admin(update, context):
-            await update.message.reply_text("Only admins can use this command.")
-            return
-        
         if not context.args:
             await update.message.reply_text("Usage: /invite @username")
             return
             
         username = context.args[0].replace('@', '')
         
-        # Check subscription
         has_subscription, amount, channel_id = await check_user_subscription(0, username)
         
         if has_subscription:
-            # Generate invite link
             try:
                 invite_link = await context.bot.create_chat_invite_link(
                     chat_id=channel_id,
@@ -263,31 +246,15 @@ async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error in test_command: {e}")
 
-async def is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Check if user is admin"""
-    try:
-        user_id = update.message.from_user.id
-        
-        # Check if admin in either channel
-        for channel_id in [CHANNEL_49_299, CHANNEL_79_399]:
-            try:
-                chat_member = await context.bot.get_chat_member(channel_id, user_id)
-                if chat_member.status in ["administrator", "creator"]:
-                    return True
-            except:
-                continue
-                
-        return False
-    except Exception as e:
-        logger.error(f"Error checking admin status: {e}")
-        return False
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Log errors"""
     logger.error(f"Error: {context.error}")
 
 def main():
     """Start the bot"""
+    # Start health check server
+    start_health_check_server()
+    
     # Check required variables
     required_vars = ['TELEGRAM_BOT_TOKEN', 'CHANNEL_49_299_ID', 'CHANNEL_79_399_ID']
     for var in required_vars:
@@ -313,19 +280,27 @@ def main():
     logger.info("Bot starting...")
     logger.info(f"Channels: {CHANNEL_49_299} and {CHANNEL_79_399}")
     
-    # Use webhook if on Railway, otherwise polling
-    if RAILWAY_STATIC_URL:
-        port = int(os.environ.get('PORT', 8443))
+    # Use webhook mode for Railway
+    port = int(os.environ.get('PORT', 8443))
+    railway_url = os.environ.get('RAILWAY_STATIC_URL', 'https://your-project.railway.app')
+    
+    logger.info(f"Using webhook mode with URL: {railway_url}")
+    
+    try:
         application.run_webhook(
             listen="0.0.0.0",
             port=port,
             url_path=BOT_TOKEN,
-            webhook_url=f"{RAILWAY_STATIC_URL}/{BOT_TOKEN}"
+            webhook_url=f"{railway_url}/{BOT_TOKEN}",
+            drop_pending_updates=True
         )
-    else:
+    except Exception as e:
+        logger.error(f"Webhook failed: {e}")
+        logger.info("Falling back to polling...")
         application.run_polling(
             allowed_updates=[Update.CHAT_MEMBER, Update.MESSAGE],
-            drop_pending_updates=True
+            drop_pending_updates=True,
+            poll_interval=2.0
         )
     
     logger.info("Bot stopped")
