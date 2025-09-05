@@ -1,7 +1,8 @@
 import os
 import logging
+import http.server
+import socketserver
 import threading
-from aiohttp import web
 from telegram import Update, ChatMember
 from telegram.ext import Application, CommandHandler, ContextTypes, ChatMemberHandler, MessageHandler, filters
 
@@ -47,23 +48,29 @@ PAYMENT_CHANNELS = {
     '399': CHANNEL_79_399
 }
 
-# Health check server
+# Simple HTTP server for health checks
+class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
 def start_health_check_server():
     """Start a simple HTTP server for health checks"""
-    async def health_check(request):
-        return web.Response(text="OK")
-    
-    app = web.Application()
-    app.router.add_get('/health', health_check)
-    
     port = int(os.environ.get('PORT', 8080))
     
     def run_server():
-        web.run_app(app, port=port, host='0.0.0.0')
+        with socketserver.TCPServer(("", port), HealthCheckHandler) as httpd:
+            logger.info(f"Health check server started on port {port}")
+            httpd.serve_forever()
     
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
-    logger.info(f"Health check server started on port {port}")
 
 async def post_init(application: Application):
     """Set up bot commands"""
